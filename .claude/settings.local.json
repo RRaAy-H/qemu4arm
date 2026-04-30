@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /arena/spcmecury/codehive/armv9qemu/install-arm64-vm.sh)",
+      "Bash(bash -n /arena/spcmecury/codehive/armv9qemu/install-arm64-vm.sh)",
+      "Bash(./install-arm64-vm.sh preflight *)",
+      "Bash(./install-arm64-vm.sh deps *)",
+      "Bash(./install-arm64-vm.sh fetch *)",
+      "Bash(./install-arm64-vm.sh prepare *)",
+      "Bash(qemu-img info *)",
+      "Bash(ssh -i vm/id_ed25519 -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o PreferredAuthentications=publickey -o PasswordAuthentication=no ubuntu@localhost 'echo HELLO; uname -m; lsb_release -d 2>/dev/null; grep -o sve2 /proc/cpuinfo | head -1')",
+      "Bash(ssh *)"
+    ]
+  }
+}
