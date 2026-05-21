@@ -1,91 +1,112 @@
-# Project Plan — QEMU arm64 Ubuntu VM with SVE2 (WSL2 host)
+# Project Plan - QEMU ARM VM With SVE2 On ARM Server
 
 ## Goal
 
-A single bash script on an **x86_64 WSL2 Ubuntu** host that:
+Provide a Bash workflow on the remote Ubuntu 24.10 aarch64 server that:
 
-1. Verifies the host is suitable (WSL2, ext4 cwd, enough RAM).
-2. Installs the required host packages (qemu-system-arm, cloud-image-utils, qemu-utils, qemu-efi-aarch64, wget).
+1. Verifies the host is the intended aarch64 server target.
+2. Installs QEMU, UEFI firmware, and cloud-init tooling.
 3. Downloads the Ubuntu Server 24.04 LTS arm64 cloud image.
-4. Prepares a working disk (qcow2 overlay, resized) and a cloud-init NoCloud seed ISO.
-5. Launches the VM under `qemu-system-aarch64 -M virt -cpu max` so SVE2 is exposed to the guest.
-6. Lets the user SSH into the guest on first boot.
+4. Creates a qcow2 guest disk and cloud-init NoCloud seed.
+5. Launches `qemu-system-aarch64` with an emulated ARMv8.5+/ARMv9-class CPU exposing SVE/SVE2.
+6. Lets the user SSH into the guest and verify SVE/SVE2.
 
-## Non-goals (keep it simple)
+The load-bearing requirement is guest SVE/SVE2. Since the physical Cortex-A72 host does not expose SVE, the VM must use QEMU TCG instead of KVM.
 
-- No libvirt, no virt-manager, no systemd units.
-- No GUI / graphical console — serial console only.
-- No snapshots, no live migration, no networking modes beyond user-mode TCP port forward.
-- No multi-distro support. Only Ubuntu 24.04 arm64.
-- No native-Linux or non-WSL host support. WSL2 only.
+## Non-Goals
 
-## Target host (WSL2-specific)
+- No libvirt, virt-manager, systemd service, or GUI.
+- No bridge networking unless the SSH port-forward approach becomes insufficient.
+- No distro matrix. The guest is Ubuntu 24.04 LTS arm64.
+- No local Windows execution support. This repo is for the remote ARM server.
+- No KVM mode while SVE/SVE2 is required on the current Cortex-A72 host.
 
-- **Distro**: Ubuntu under **WSL2** on Windows 10/11. Uses `apt`. No branching for other distros.
-- **Architecture**: x86_64 host, arm64 guest. KVM is **not** used (cross-arch). QEMU runs in pure TCG emulation — slow, expected, not tuned beyond `-smp` and `-m`.
-- **Disk location**: VM artifacts must live on the Linux ext4 filesystem (e.g. `~/vm/`), **not** under `/mnt/c/...`. DrvFs is ~10× slower and breaks qcow2 sparse semantics. The script refuses to run from a `/mnt/*` path.
-- **RAM budget**: WSL2's RAM ceiling is set in `%UserProfile%\.wslconfig` on the Windows side. QEMU is launched with `-m 4096`; WSL2 needs ≥6 GB visible (`MemTotal` in `/proc/meminfo`) or the guest will OOM during cloud-init. Script checks and aborts with a clear message pointing at `.wslconfig`.
-- **SSH access**:
-  - From inside WSL: `ssh -p 2222 ubuntu@localhost` — works directly.
-  - From Windows host: works on Windows 11 (localhost forwarding is automatic) but **not reliably on Windows 10** without `netsh portproxy` or mirrored networking mode. Script prints both the WSL-side and Windows-side instructions on success.
+## Target Host
 
-## Files the script will produce
+- OS: Ubuntu 24.10.
+- Architecture: `aarch64`.
+- CPU: Cortex-A72, 64 online CPUs, no SVE/SVE2 in host flags.
+- Emulator: `qemu-system-aarch64`.
+- Acceleration: `-accel tcg,thread=multi`.
+- CPU model: `max,pauth=off,sve=on,sve128=on`.
+- Machine: `virt,gic-version=3`.
+- Firmware: AAVMF/UEFI from `qemu-efi-aarch64`.
 
+## Script Breakdown
+
+`install-arm64-vm.sh` is the authoritative entry point:
+
+- `preflight`: checks host architecture, host SVE/SVE2 status, selected VM resources, free disk, and QEMU if already installed.
+- `deps`: installs `qemu-system-arm`, `qemu-utils`, `qemu-efi-aarch64`, `cloud-image-utils`, `wget`, `openssh-client`, `genisoimage`, and `coreutils`.
+- `fetch`: downloads `noble-server-cloudimg-arm64.img` if missing.
+- `prepare`: copies UEFI firmware, creates `QEMU_VARS.fd`, creates the qcow2 overlay, creates the SSH key, and builds `seed.iso`.
+- `run`: validates QEMU, launches the VM on the serial console, and forwards host port `2222` to guest SSH port `22`.
+- `all`: runs `preflight`, `deps`, `fetch`, `prepare`, and `run`.
+
+`startvm.sh` is intentionally just a wrapper for `./install-arm64-vm.sh run` so resource defaults stay in one place.
+
+## Resource Defaults
+
+The script picks server-oriented defaults while keeping environment overrides:
+
+- `SMP`: 75% of online CPUs, capped at `48`.
+- `MEM`: 75% of host RAM, capped at `98304` MiB.
+- `DISK_SIZE`: `100G` sparse qcow2 overlay.
+- `SSH_PORT`: `2222`.
+- `VM_DIR`: `./vm`.
+
+These values are deliberately conservative for a shared 64-core server. Use explicit overrides when the server is dedicated to this VM, for example:
+
+```bash
+SMP=48 MEM=98304 DISK_SIZE=200G ./install-arm64-vm.sh all
 ```
-./vm/
-  noble-server-cloudimg-arm64.img      # base image (downloaded, read-only source)
-  ubuntu-arm64.qcow2                   # qcow2 overlay, resized, used as VM disk
-  seed.iso                             # cloud-init NoCloud seed (user-data + meta-data)
-  QEMU_EFI.fd                          # UEFI firmware (copied from qemu-efi-aarch64 pkg)
-  QEMU_VARS.fd                         # UEFI vars (per-VM copy)
-  user-data                            # cloud-init: user `ubuntu`, ssh key, password
-  meta-data                            # cloud-init: instance-id, hostname
-```
 
-## Script breakdown
+## QEMU Command Shape
 
-One script, `install-arm64-vm.sh`, with subcommands so steps are independently runnable:
-
-| Subcommand | Action | Verify |
-|---|---|---|
-| `preflight` | Check WSL2 (`grep -qi microsoft /proc/version`), cwd not under `/mnt/*`, `MemTotal` ≥ 6 GB, ≥6 GB free disk | All checks pass; otherwise abort with actionable message |
-| `deps`    | `apt install qemu-system-arm cloud-image-utils qemu-utils qemu-efi-aarch64 wget` | `command -v qemu-system-aarch64` exits 0 |
-| `fetch`   | `wget` the noble-server-cloudimg-arm64.img if missing | file exists, size > 400 MB |
-| `prepare` | Probe AAVMF path (`/usr/share/AAVMF/` or `/usr/share/qemu-efi-aarch64/`), copy UEFI firmware, create qcow2 overlay on top of base, resize to 20G, generate `user-data`/`meta-data`, build `seed.iso` via `cloud-localds` | `qemu-img info` shows 20G; `seed.iso` exists |
-| `run`     | `exec qemu-system-aarch64 -M virt -cpu max …` with serial to stdio, user-net forwarding host :2222 → guest :22 | boots to login prompt; `ssh -p 2222 ubuntu@localhost` works |
-| `all`     | preflight → deps → fetch → prepare → run | same as `run` |
-
-## QEMU command (target)
-
-```
+```bash
 qemu-system-aarch64 \
-  -M virt \
-  -cpu max \
-  -smp 4 -m 4096 \
+  -accel tcg,thread=multi \
+  -machine virt,gic-version=3 \
+  -cpu max,pauth=off,sve=on,sve128=on \
+  -smp "$SMP" -m "$MEM" \
   -drive if=pflash,format=raw,readonly=on,file=vm/QEMU_EFI.fd \
   -drive if=pflash,format=raw,file=vm/QEMU_VARS.fd \
   -drive if=virtio,format=qcow2,file=vm/ubuntu-arm64.qcow2 \
   -drive if=virtio,format=raw,file=vm/seed.iso \
   -netdev user,id=net0,hostfwd=tcp::2222-:22 \
   -device virtio-net-pci,netdev=net0 \
+  -device virtio-rng-pci \
   -nographic
 ```
 
-## Success criteria (goal-driven)
+## Files Produced
 
-1. `./install-arm64-vm.sh all` → boot reaches `ubuntu login:` on serial console. **Verify:** prompt visible in terminal.
-2. From the WSL terminal: `ssh -p 2222 ubuntu@localhost` succeeds. **Verify:** login ok.
-3. Inside the guest: `uname -m` returns `aarch64`. **Verify:** string match.
-4. Inside the guest: `cat /proc/cpuinfo | grep -o sve2 | head -1` returns `sve2`. **Verify:** non-empty (this is the SVE2 confirmation — the whole reason for `-cpu max`).
-5. Inside the guest: `lsb_release -d` reports `Ubuntu 24.04 LTS`. **Verify:** string match.
+```text
+./vm/
+  noble-server-cloudimg-arm64.img
+  ubuntu-arm64.qcow2
+  seed.iso
+  QEMU_EFI.fd
+  QEMU_VARS.fd
+  user-data
+  meta-data
+  id_ed25519
+  id_ed25519.pub
+```
 
-Step 4 is the load-bearing check. If `/proc/cpuinfo` does not list `sve2` the setup has failed regardless of whether the VM boots.
+## Success Criteria
 
-## Known risks / assumptions
+1. `./install-arm64-vm.sh preflight` accepts the Ubuntu 24.10 aarch64 server.
+2. `./install-arm64-vm.sh all` reaches the Ubuntu serial console.
+3. SSH works from the server with `ssh -i vm/id_ed25519 -p 2222 ubuntu@localhost`.
+4. `uname -m` inside the guest returns `aarch64`.
+5. The guest `Features` line in `/proc/cpuinfo` contains `sve` and `sve2`.
 
-- `edk2-aarch64` package path differs across Ubuntu versions (`/usr/share/AAVMF/` vs `/usr/share/qemu-efi-aarch64/`). Script must probe both.
-- TCG emulation of arm64 on x86 is slow; first boot (cloud-init) on WSL2 can take 5–10 minutes. Not a bug.
-- WSL2 RAM cap is invisible from inside the guest's `apt` — set it via `.wslconfig` on the Windows side and `wsl --shutdown` before relaunching WSL.
-- Host must have ~6 GB free disk on the ext4 side (base image + 20 GB sparse qcow2 overlay + seed).
-- We do **not** install via the full `ubuntu-24.04-live-server-arm64.iso` installer — cloud image + cloud-init is the standard arm64 path.
-- SSH from Windows (not from WSL) is out of scope to script around; we print guidance only.
+Step 5 is the deciding check. If `sve2` is missing in the guest, the setup failed even if the VM boots.
+
+## Known Risks
+
+- TCG is slower than KVM. It is required here because KVM cannot invent SVE/SVE2 on a Cortex-A72 host.
+- QEMU package paths for AAVMF can vary; the script probes common Ubuntu paths.
+- QEMU CPU help output is not the final source of truth. The guest `/proc/cpuinfo` check is authoritative.
+- High `SMP` values can increase TCG overhead for some workloads. The default aims to use the large server safely without consuming every core.
