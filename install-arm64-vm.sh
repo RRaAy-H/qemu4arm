@@ -17,23 +17,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "[+] $*"; }
 
 cmd_preflight() {
-    log "preflight: WSL2 check"
-    grep -qi microsoft /proc/version || die "not running under WSL — this script is WSL2-only"
-    grep -qi 'wsl2\|microsoft-standard' /proc/version || log "warning: kernel does not look like WSL2; continuing"
-
-    log "preflight: cwd not under /mnt"
-    case "$PWD" in
-        /mnt/*) die "cwd is $PWD — VM files must live on ext4 (e.g. \$HOME), not DrvFs" ;;
-    esac
-    case "$VM_DIR" in
-        /mnt/*) die "VM_DIR is $VM_DIR — must be on ext4, not DrvFs" ;;
-    esac
-
     log "preflight: RAM >= 6 GB"
     local mem_kb
     mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
     [ "$mem_kb" -ge $((6 * 1024 * 1024)) ] \
-        || die "WSL2 sees ${mem_kb} kB RAM; need >=6 GB. Set memory=8GB in %UserProfile%\\.wslconfig and run 'wsl --shutdown'."
+        || die "only ${mem_kb} kB RAM visible; need >=6 GB"
 
     log "preflight: disk >= 6 GB free in $(dirname "$VM_DIR")"
     local avail_kb
@@ -143,14 +131,14 @@ cmd_run() {
 
     cat <<EOF
 [+] launching VM (Ctrl-A X to quit serial console)
-    SSH from WSL:     ssh -i $VM_DIR/id_ed25519 -p $SSH_PORT ubuntu@localhost
-    SSH from Windows: works on Win11 (localhost passthrough); on Win10 use 'netsh interface portproxy'
-    Login fallback:   user 'ubuntu' / password 'ubuntu' on the serial console
+    SSH:            ssh -i $VM_DIR/id_ed25519 -p $SSH_PORT ubuntu@localhost
+    Login fallback: user 'ubuntu' / password 'ubuntu' on the serial console
 EOF
 
     exec qemu-system-aarch64 \
-        -M virt \
-        -cpu max \
+        -accel tcg,thread=multi \
+        -machine virt,gic-version=3 \
+        -cpu max,pauth=off,sve128=on \
         -smp "$SMP" -m "$MEM" \
         -drive if=pflash,format=raw,readonly=on,file="$EFI" \
         -drive if=pflash,format=raw,file="$VARS" \
@@ -158,6 +146,7 @@ EOF
         -drive if=virtio,format=raw,file="$SEED" \
         -netdev user,id=net0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -device virtio-net-pci,netdev=net0 \
+        -device virtio-rng-pci \
         -nographic
 }
 
@@ -173,7 +162,7 @@ usage() {
     cat <<EOF
 usage: $0 {preflight|deps|fetch|prepare|run|all}
 
-  preflight  check WSL2, ext4 cwd, RAM, disk
+  preflight  check RAM and disk
   deps       apt install qemu + cloud-image tools
   fetch      download Ubuntu 24.04 arm64 cloud image
   prepare    build qcow2 overlay, UEFI vars, cloud-init seed
