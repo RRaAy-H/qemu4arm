@@ -28,13 +28,63 @@ cd qemu4arm
 
 The first boot can take a while because this is CPU emulation, not KVM. The VM runs on the serial console with SSH forwarded from host port `2222` to guest port `22`.
 
+For normal use, start the VM inside `tmux` so it keeps running after your SSH session to the server disconnects:
+
+```bash
+sudo apt install -y tmux
+cd ~/qemu4arm
+tmux new -s qemu4arm './install-arm64-vm.sh all'
+```
+
+Detach from the VM console with `Ctrl-b` then `d`. Reattach later with:
+
+```bash
+tmux attach -t qemu4arm
+```
+
+## Ubuntu 24.10 Apt Sources
+
+Ubuntu 24.10 Oracular is no longer available from the normal `ports.ubuntu.com` repository. If `./install-arm64-vm.sh all` fails during `sudo apt update` or `sudo apt install` with `oracular Release` or package `404 Not Found` errors, move the Oracular sources to Ubuntu old releases:
+
+```bash
+sudo cp -a /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
+sudo cp -a /etc/apt/sources.list.d /etc/apt/sources.list.d.bak
+
+sudo grep -RIl 'oracular' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null \
+  | xargs -r sudo sed -i -E \
+    's|https?://ports.ubuntu.com/ubuntu-ports|http://old-releases.ubuntu.com/ubuntu|g'
+
+sudo apt clean
+sudo apt update
+```
+
+After `sudo apt update` succeeds, run the normal command:
+
+```bash
+./install-arm64-vm.sh all
+```
+
 ## Login
+
+Connect from the ARM server host to the VM over the forwarded SSH port:
 
 ```bash
 ssh -i vm/id_ed25519 -p 2222 ubuntu@localhost
 ```
 
-The serial-console fallback is user `ubuntu` with password `ubuntu`.
+The VM login is:
+
+- Username: `ubuntu`
+- SSH key: `vm/id_ed25519`
+- Password fallback: `ubuntu`
+
+Password login is enabled by cloud-init, so this also works after SSH is ready:
+
+```bash
+ssh -p 2222 ubuntu@localhost
+```
+
+The same username and password work on the serial console shown in the QEMU/tmux session.
 
 ## Verify SVE2
 
@@ -76,6 +126,41 @@ Keep `ACCEL=tcg,thread=multi` unless the goal changes. Switching to KVM on the C
 - `./install-arm64-vm.sh all`: runs the full flow.
 
 `startvm.sh` is only a wrapper for `./install-arm64-vm.sh run`.
+
+## Keep The VM In tmux
+
+After the first successful `all` run, start the prepared VM with:
+
+```bash
+cd ~/qemu4arm
+tmux new -s qemu4arm './startvm.sh'
+```
+
+If a `qemu4arm` tmux session may already exist, use this duplicate-safe command:
+
+```bash
+tmux has-session -t qemu4arm 2>/dev/null \
+  || tmux new -d -s qemu4arm 'cd ~/qemu4arm && ./startvm.sh'
+```
+
+To start the VM in tmux automatically when the server reboots, add the same command to your user crontab:
+
+```bash
+crontab -e
+```
+
+Add:
+
+```cron
+@reboot tmux has-session -t qemu4arm 2>/dev/null || tmux new -d -s qemu4arm 'cd /home/rayh/qemu4arm && ./startvm.sh'
+```
+
+Check it after login with:
+
+```bash
+tmux ls
+tmux attach -t qemu4arm
+```
 
 ## Files Produced Under `./vm`
 
